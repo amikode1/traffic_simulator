@@ -1,0 +1,1 @@
+"""Traffic Simulator — core simulation engine."""
