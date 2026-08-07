@@ -48,6 +48,7 @@ class TrafficSimulation:
     next_car_id: int = 0
     time_seconds: float = 0.0
     spawn_timer: float = 0.0
+    warmup_seconds: float = 0.0  # if > 0, trips completed before this time are discarded
     _stats: dict = field(default_factory=lambda: {
         "total_spawned": 0,
         "total_reached_destination": 0,
@@ -59,7 +60,10 @@ class TrafficSimulation:
     _selfish_reroute_queue: list[int] = field(default_factory=list)
     _selfish_reroute_idx: int = 0
     _selfish_counts_snapshot: dict = field(default_factory=dict)
-    _selfish_bpr_graph: Any = None  # pre-built nx.DiGraph for selfish cycle
+    _selfish_bpr_graph: Any = None
+
+    # ── GA optimisation info (optional, set by main.py) ──
+    ga_label: str = ""
 
     # ── Public API ──────────────────────────────────────────────
 
@@ -96,6 +100,13 @@ class TrafficSimulation:
         # 4. Remove cars that reached destination
         self._remove_arrived_cars()
 
+    def set_warmup(self, seconds: float) -> None:
+        """Set a warm-up period — trips that finish before this sim time are not recorded.
+
+        This prevents early short trips (empty roads) from distorting the average.
+        """
+        self.warmup_seconds = seconds
+
     def set_desired_car_count(self, count: int) -> None:
         """Set the target number of cars (clamped to min/max)."""
         self.desired_car_count = max(
@@ -116,22 +127,16 @@ class TrafficSimulation:
             self._reroute_all_cars()
 
     def toggle_block_edge(self, u: NodeID, v: NodeID, key: EdgeKey = 0) -> bool:
-        """Toggle a road edge's blocked status. Returns new blocked state.
+        """Toggle a single directed road edge's blocked status. Returns new blocked state.
 
-        If the road is two-way (both (u,v) and (v,u) exist), toggling one
-        direction toggles both — the whole road is blocked or open.
+        NOTE: This only toggles the single direction (u → v). It does NOT
+        auto-toggle the opposite direction, so that the GA's per-direction
+        logic is preserved in the visual simulation. Use block_edge() or
+        unblock_edge() if you need to affect both sides.
         """
         is_blocked = self.road_network.toggle_block_edge(u, v, key)
-        # Also toggle the opposite direction if it's a two-way road
-        if self.road_network.get_edge(v, u, key) is not None:
-            if is_blocked:
-                self.road_network.block_edge(v, u, key)
-            else:
-                self.road_network.unblock_edge(v, u, key)
-        # Reroute cars affected by this blockage (both directions)
+        # Reroute cars affected by this blockage (single direction only)
         self._reroute_affected_cars(u, v, key)
-        if self.road_network.get_edge(v, u, key) is not None:
-            self._reroute_affected_cars(v, u, key)
         return is_blocked
 
     def block_edge(self, u: NodeID, v: NodeID, key: EdgeKey = 0) -> bool:
@@ -161,7 +166,12 @@ class TrafficSimulation:
         return result
 
     def get_stats(self) -> dict:
-        """Return a copy of the simulation statistics, including computed averages."""
+        """Return a copy of the simulation statistics, including computed averages.
+
+        Each car's travel time is measured from when it spawns to when it
+        reaches its destination. The average is (total of all travel times)
+        / (number of completed trips).
+        """
         stats = dict(self._stats)
         if stats["completed_trips"] > 0:
             stats["avg_travel_time_seconds"] = (
@@ -801,14 +811,21 @@ class TrafficSimulation:
     # ── Internal: Cleanup ───────────────────────────────────────
 
     def _remove_arrived_cars(self) -> None:
-        """Remove cars that have reached their destination and record travel times."""
+        """Remove cars that have reached their destination and record travel times.
+
+        During the warm-up period (self.warmup_seconds > 0), arrived cars are
+        still removed but their travel times are NOT counted in the stats.
+        This prevents early short trips (empty roads) from distorting the average.
+        """
         remaining: list[Car] = []
+        recording = self.warmup_seconds <= 0.0 or self.time_seconds >= self.warmup_seconds
         for car in self.cars:
             if car.reached_destination:
                 self._stats["total_reached_destination"] += 1
-                travel_time = self.time_seconds - car.spawn_time
-                self._stats["total_travel_time_seconds"] += travel_time
-                self._stats["completed_trips"] += 1
+                if recording:
+                    travel_time = self.time_seconds - car.spawn_time
+                    self._stats["total_travel_time_seconds"] += travel_time
+                    self._stats["completed_trips"] += 1
             else:
                 remaining.append(car)
         self.cars = remaining

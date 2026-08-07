@@ -573,15 +573,25 @@ class Renderer:
         title = self.font_large.render("TRAFFIC SIM", True, (200, 200, 200))
         self.screen.blit(title, (panel_x + 10, 10))
 
+        # GA optimisation label (if active)
+        if simulation.ga_label:
+            ga_text = self.font_small.render(
+                simulation.ga_label, True, (100, 255, 100),  # green highlight
+            )
+            self.screen.blit(ga_text, (panel_x + 10, 35))
+            y_offset = 60
+        else:
+            y_offset = 40
+
         # City name
         city_text = self.font_small.render(
             f"City: {simulation.road_network.node_count} nodes",
             True, (150, 150, 150),
         )
-        self.screen.blit(city_text, (panel_x + 10, 40))
+        self.screen.blit(city_text, (panel_x + 10, y_offset))
 
         # ── Car count slider info ──
-        y = 80
+        y = y_offset + 25
         label = self.font.render(f"Cars: {len(simulation.cars)} / {simulation.desired_car_count}", True, (200, 200, 200))
         self.screen.blit(label, (panel_x + 10, y))
         y += 25
@@ -667,17 +677,21 @@ class Renderer:
         screen_y: float,
         simulation: TrafficSimulation,
         threshold: float = 8.0,
+        prefer_reverse: bool = False,
     ) -> Optional[tuple[NodeID, NodeID, EdgeKey]]:
         """Find the nearest road edge to a screen point.
 
-        Used for click-to-block interaction.  If the edge cache is stale
-        (e.g. after a zoom), points are computed on the fly so the first
-        click after a zoom is never missed.
+        For two-way roads (both (u,v) and (v,u) exist), the function
+        returns the forward direction (u,v) by default, or the reverse
+        direction (v,u) when prefer_reverse=True. This allows left-click
+        to block one direction and right-click to block the other.
 
         Args:
             screen_x, screen_y: Screen pixel coordinates.
             simulation: The simulation state.
             threshold: Max distance in pixels to consider a hit.
+            prefer_reverse: If True, prefer the reverse direction for
+                two-way roads.
 
         Returns:
             (u, v, key) of the nearest edge, or None.
@@ -708,6 +722,11 @@ class Renderer:
                     best_edge = (u, v, key)
 
         if best_dist <= threshold:
+            # For two-way roads, prefer the requested direction
+            if best_edge is not None and prefer_reverse:
+                u, v, key = best_edge
+                if rn.get_edge(v, u, key) is not None:
+                    best_edge = (v, u, key)
             self._hovered_edge = best_edge
             return best_edge
 

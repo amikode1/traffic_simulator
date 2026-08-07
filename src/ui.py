@@ -44,6 +44,7 @@ class UIHandler:
         self.mouse_pos: tuple[int, int] = (0, 0)
         self.mouse_on_map: bool = False
         self.left_click: bool = False
+        self.right_click: bool = False
         self.keys_pressed: set[int] = set()
         self.screen_width: int = config.WINDOW_WIDTH
         self.screen_height: int = config.WINDOW_HEIGHT
@@ -71,6 +72,7 @@ class UIHandler:
         """
         running = True
         self.left_click = False
+        self.right_click = False
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -116,9 +118,14 @@ class UIHandler:
                     if self.mouse_on_map and self.start_drag_fn:
                         self._is_dragging = True
                         self.start_drag_fn(event.pos[0], event.pos[1])
-                # Left click
+                # Left click — block forward direction
                 elif event.button == 1:
                     self.left_click = True
+                    self.right_click = False
+                # Right click — block reverse direction
+                elif event.button == 3:
+                    self.right_click = True
+                    self.left_click = False
 
             elif event.type == pygame.MOUSEBUTTONUP:
                 if event.button == 2 and self._is_dragging:
@@ -205,18 +212,23 @@ class UIHandler:
     ) -> None:
         """Handle a mouse click on the map area (block/unblock road).
 
+        Left click: blocks the forward direction (u → v) of the nearest edge.
+        Right click: blocks the reverse direction (v → u) of the nearest edge.
+
         Args:
             simulation: The simulation to modify.
-            find_edge_fn: A callable that takes (x, y, simulation) and returns
-                an edge tuple or None.
+            find_edge_fn: A callable that takes (x, y, simulation, prefer_reverse)
+                and returns an edge tuple or None.
         """
-        if not self.left_click or not self.mouse_on_map:
+        if not (self.left_click or self.right_click) or not self.mouse_on_map:
             return
 
         x, y = self.mouse_pos
-        edge = find_edge_fn(x, y, simulation)
+        prefer_reverse = self.right_click
+        edge = find_edge_fn(x, y, simulation, prefer_reverse=prefer_reverse)
         if edge is not None:
             u, v, key = edge
             is_blocked = simulation.toggle_block_edge(u, v, key)
-            log.info("Edge (%d, %d, %d) %s", u, v, key,
+            direction = "reverse" if prefer_reverse else "forward"
+            log.info("Edge (%d, %d, %d) [%s] %s", u, v, key, direction,
                      "blocked" if is_blocked else "unblocked")

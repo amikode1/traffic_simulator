@@ -1,10 +1,13 @@
 """Traffic Simulator — Main Entry Point.
 
-Initialises Pygame, loads the city map, and runs the simulation loop.
+Accepts optional --ga <file> flag to load GA-optimised road closures:
+    python main.py "Manhattan" --ga data/ga_result_Manhattan__New_York__USA.json
 """
 
+import json
 import logging
 import math
+import os
 import sys
 import threading
 import time
@@ -110,11 +113,23 @@ def _show_error_screen(screen: pygame.Surface, message: str) -> None:
 # ── Main ────────────────────────────────────────────────────────
 
 def main() -> None:
-    """Run the traffic simulator application."""
+    """Run the traffic simulator application.
+
+    Usage:
+        python main.py "Manhattan"
+        python main.py "Greenwood_Township" --ga data/ga_result_Greenwood_Township.json
+    """
     # ── Parse optional command-line args ──
     city_name = config.DEFAULT_CITY
-    if len(sys.argv) > 1:
-        city_name = " ".join(sys.argv[1:])
+    ga_result_path: Optional[str] = None
+    args = sys.argv[1:]
+    if "--ga" in args:
+        idx = args.index("--ga")
+        if idx + 1 < len(args):
+            ga_result_path = args[idx + 1]
+            args = args[:idx] + args[idx + 2:]
+    if args:
+        city_name = " ".join(args)
 
     # ── Initialise Pygame ──
     pygame.init()
@@ -184,12 +199,71 @@ def main() -> None:
         len(traffic_lights),
     )
 
+    # ── Apply GA-optimised road closures if requested ──
+    if ga_result_path is not None:
+        if not os.path.exists(ga_result_path):
+            log.error("GA result file not found: %s", ga_result_path)
+            _show_error_screen(screen, f"GA result not found: {ga_result_path}")
+            pygame.quit()
+            return
+
+        try:
+            with open(ga_result_path) as f:
+                ga_data = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            log.error("Failed to read GA result: %s", exc)
+            _show_error_screen(screen, f"Invalid GA result file: {exc}")
+            pygame.quit()
+            return
+
+        closed_roads = ga_data.get("closed_roads", [])
+        blocked_count = 0
+        for road in closed_roads:
+            if road.get("close", False):
+                u, v, key = road["edge"]
+                if road_network.block_edge(u, v, key):
+                    blocked_count += 1
+                # NOTE: The GA only tested closing this one direction (u→v).
+                # We do NOT block the opposite direction to stay consistent
+                # with what the GA evaluated.
+
+        benefit = ga_data.get("benefit", 0.0)
+        optimal_avg = ga_data.get("optimal_avg", 0.0)
+        log.info(
+            "Applied GA-optimised solution: %d roads blocked, "
+            "benefit=%.3fs, optimal avg=%.2fs",
+            blocked_count, benefit, optimal_avg,
+        )
+
+        # Store GA info for later use after simulation creation
+        _ga_label_text = (
+            f"GA Optimised: {blocked_count} roads closed, "
+            f"benefit {benefit:.2f}s"
+        )
+        _ga_window_title = (
+            f"Traffic Simulator — GA Optimised "
+            f"({blocked_count} roads closed, benefit {benefit:.2f}s)"
+        )
+    else:
+        _ga_label_text = ""
+        _ga_window_title = None
+
     # ── Create simulation ──
     simulation = TrafficSimulation(
         road_network=road_network,
         traffic_lights=traffic_lights,
         desired_car_count=config.DEFAULT_CAR_COUNT,
     )
+    # Warm-up period: discard trips completed before this simulation time
+    # so the average travel time reflects steady-state congestion, not
+    # the early empty-road period.
+    simulation.set_warmup(60.0)
+
+    # Apply GA info to simulation and window title (after simulation exists)
+    if _ga_label_text:
+        simulation.ga_label = _ga_label_text
+        if _ga_window_title:
+            pygame.display.set_caption(_ga_window_title)
 
     # ── Create renderer & UI ──
     renderer = Renderer(screen)
@@ -230,7 +304,7 @@ def main() -> None:
         running = ui_handler.process_events(simulation)
 
         # ── Handle click on map → block/unblock road ──
-        if ui_handler.left_click and ui_handler.mouse_on_map:
+        if (ui_handler.left_click or ui_handler.right_click) and ui_handler.mouse_on_map:
             ui_handler.handle_click_on_map(
                 simulation,
                 renderer.find_edge_at_screen,

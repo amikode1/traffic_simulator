@@ -207,7 +207,7 @@ class HeadlessSimulation(TrafficSimulation):
         self.road_network = road_network
         self.traffic_lights = traffic_lights or []
         self.cars: list[Car] = []
-        self.algorithm: str = "dijkstra"
+        self.algorithm: str = "selfish"
         self.desired_car_count: int = 0
         self.speed_multiplier: float = 1.0
         self.next_car_id: int = 0
@@ -225,6 +225,7 @@ class HeadlessSimulation(TrafficSimulation):
         self._selfish_reroute_idx: int = 0
         self._selfish_counts_snapshot: dict = {}
         self._selfish_bpr_graph: Any = None
+        self.ga_label: str = ""
 
         # ── Headless-specific state ──
         self.commuters: list[Commuter] = [
@@ -402,13 +403,10 @@ class HeadlessSimulation(TrafficSimulation):
         while self.completed_trips < min_completed and step < max_steps:
             step += 1
 
-            # Advance the simulation
+            # Advance the simulation using the full update() method
+            # (includes selfish rerouting, traffic lights, car movement, and cleanup)
             clamped_dt = min(dt, 0.1)
-            self.time_seconds += clamped_dt
-            self._sweep_blocked_edges()
-            self._update_traffic_lights(clamped_dt)
-            self._move_cars(clamped_dt)
-            self._remove_arrived_cars()
+            self.update(clamped_dt)
 
             # Progress reporting
             if (progress_callback
