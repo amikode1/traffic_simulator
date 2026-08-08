@@ -139,6 +139,35 @@ class Car:
         self.progress = 0.0
         self.rerouting = False
 
+    def reset_for_new_trip(
+        self,
+        route: list[NodeID],
+        start_edge: tuple[NodeID, NodeID, EdgeKey],
+        lane: int,
+        spawn_time: float,
+    ) -> None:
+        """Reset the car for a new trip from origin to destination.
+
+        Args:
+            route: Full list of node IDs (origin to destination).
+            start_edge: The first edge to drive on.
+            lane: Lane to start on.
+            spawn_time: New spawn time for this trip.
+        """
+        self.route = route
+        self.route_index = 0
+        self.current_edge = start_edge
+        self.current_lane = lane
+        self.progress = 0.0
+        self.spawn_time = spawn_time
+        self.speed_ms = config.DEFAULT_SPEED_MS
+        self.target_speed_ms = config.DEFAULT_SPEED_MS
+        self.waiting_at_light = False
+        self.light_wait_seconds = 0.0
+        self.waiting_for_car_ahead = False
+        self.car_ahead_wait_seconds = 0.0
+        self.rerouting = False
+
     def get_position_on_edge(
         self,
         geometry: LineString,

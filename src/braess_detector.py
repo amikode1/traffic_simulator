@@ -37,24 +37,6 @@ from src.traffic_light import TrafficLight
 log = logging.getLogger(__name__)
 
 
-# ── Commuter definition ───────────────────────────────────────────
-
-@dataclass
-class Commuter:
-    """A fixed origin-destination pair that perpetually reroutes.
-
-    Attributes:
-        origin: Start node ID.
-        destination: End node ID.
-        car_id: ID of the currently assigned car (-1 if waiting to respawn).
-        completed_trips: How many times this commuter has finished a trip.
-    """
-    origin: NodeID
-    destination: NodeID
-    car_id: int = -1
-    completed_trips: int = 0
-
-
 # ── Connectivity helpers ──────────────────────────────────────────
 
 def _find_bridges(
@@ -187,12 +169,12 @@ def _edge_is_critical(
 # ── Headless Simulation ───────────────────────────────────────────
 
 class HeadlessSimulation(TrafficSimulation):
-    """Simulation that runs at maximum speed with a fixed commuter set.
+    """Simulation that runs at maximum speed with Poisson car spawning.
 
-    Extends TrafficSimulation by:
-    - Skipping automatic car spawning (uses fixed commuters).
-    - Tracking completed trips for each commuter.
-    - Respawning cars that have reached their destination.
+    Extends TrafficSimulation by providing a run_until_stable() loop
+    that runs headless (no rendering, no frame cap) until a target
+    number of trips have completed. Uses the same Poisson process
+    as the visible simulation for consistency.
 
     This is NOT a dataclass — we override __init__ explicitly.
     """
@@ -200,7 +182,7 @@ class HeadlessSimulation(TrafficSimulation):
     def __init__(
         self,
         road_network: RoadNetwork,
-        commuter_pairs: list[tuple[NodeID, NodeID]],
+        poisson_rate: float = 0.5,
         traffic_lights: Optional[list[TrafficLight]] = None,
     ) -> None:
         # Manually initialise all TrafficSimulation fields (bypass dataclass)
@@ -208,11 +190,11 @@ class HeadlessSimulation(TrafficSimulation):
         self.traffic_lights = traffic_lights or []
         self.cars: list[Car] = []
         self.algorithm: str = "selfish"
-        self.desired_car_count: int = 0
         self.speed_multiplier: float = 1.0
         self.next_car_id: int = 0
         self.time_seconds: float = 0.0
-        self.spawn_timer: float = 0.0
+        self.poisson_rate: float = poisson_rate
+        self._next_spawn_time: float = 0.0  # spawn immediately on first tick
         self._stats: dict = {
             "total_spawned": 0,
             "total_reached_destination": 0,
@@ -226,129 +208,6 @@ class HeadlessSimulation(TrafficSimulation):
         self._selfish_counts_snapshot: dict = {}
         self._selfish_bpr_graph: Any = None
         self.ga_label: str = ""
-
-        # ── Headless-specific state ──
-        self.commuters: list[Commuter] = [
-            Commuter(origin=o, destination=d)
-            for o, d in commuter_pairs
-        ]
-        self.completed_trips: int = 0
-        self.total_travel_time: float = 0.0
-
-        # Spawn all commuters immediately
-        self._spawn_all_commuters()
-
-    # ── Override: no automatic car spawning ──
-
-    def _adjust_car_count(self, dt: float) -> None:
-        """Override: do nothing — fixed commuters are managed separately."""
-        pass
-
-    # ── Override: record travel times ──
-
-    def _remove_arrived_cars(self) -> None:
-        """Remove arrived cars, record travel times, and immediately respawn."""
-        remaining: list[Car] = []
-        for car in self.cars:
-            if car.reached_destination:
-                travel_time = self.time_seconds - car.spawn_time
-                self.total_travel_time += travel_time
-                self.completed_trips += 1
-
-                # Find which commuter this car belongs to and mark as done
-                for commuter in self.commuters:
-                    if commuter.car_id == car.id:
-                        commuter.completed_trips += 1
-                        commuter.car_id = -1
-                        break
-            else:
-                remaining.append(car)
-        self.cars = remaining
-
-        # Respawn any commuters that have completed their trip
-        self._respawn_commuters()
-
-    # ── Commuter management ──
-
-    def _spawn_all_commuters(self) -> None:
-        """Spawn all commuter cars onto the network."""
-        for commuter in self.commuters:
-            car = self._create_commuter_car(commuter)
-            if car is not None:
-                self.cars.append(car)
-                commuter.car_id = car.id
-
-    def _respawn_commuters(self) -> None:
-        """Respawn commuters that have no active car."""
-        for commuter in self.commuters:
-            if commuter.car_id == -1:
-                car = self._create_commuter_car(commuter)
-                if car is not None:
-                    self.cars.append(car)
-                    commuter.car_id = car.id
-
-    def _create_commuter_car(self, commuter: Commuter) -> Optional[Car]:
-        """Create a new car for a commuter with the fixed O-D pair.
-
-        Finds a valid edge from the origin node and computes a path
-        to the destination.
-
-        Args:
-            commuter: The commuter to create a car for.
-
-        Returns:
-            The new Car, or None if spawning failed.
-        """
-        origin = commuter.origin
-        destination = commuter.destination
-        working_graph = self.road_network.get_working_graph()
-
-        # Find edges from origin
-        edges = self.road_network.edges_from_node(origin)
-        if not edges:
-            return None
-
-        # Pick a random unblocked edge from origin
-        random.shuffle(edges)
-        chosen_edge: Optional[tuple[NodeID, NodeID, EdgeKey]] = None
-        chosen_path: Optional[list[NodeID]] = None
-        for u, v, key in edges:
-            if self.road_network.is_edge_blocked(u, v, key):
-                continue
-            # Find path from v to destination
-            path = self._find_path(working_graph, v, destination)
-            if path is not None:
-                chosen_edge = (u, v, key)
-                chosen_path = path
-                break
-
-        if chosen_edge is None or chosen_path is None:
-            return None
-
-        u, v, key = chosen_edge
-        edge_data = self.road_network.get_edge_attributes(u, v, key)
-        lane = random.randint(0, max(edge_data.lanes - 1, 0))
-        target_speed = edge_data.speed_kph / 3.6
-
-        car = Car(
-            id=self.next_car_id,
-            current_edge=(u, v, key),
-            current_lane=lane,
-            progress=0.0,
-            target_speed_ms=target_speed,
-            speed_ms=target_speed * 0.8,
-            color=config.CAR_COLOR,
-            spawn_time=self.time_seconds,
-        )
-
-        # Build route: [u, v, ...path]
-        if chosen_path[0] == v:
-            car.route = [u] + chosen_path
-        else:
-            car.route = [u, v] + chosen_path
-        car.route_index = 0
-        self.next_car_id += 1
-        return car
 
     @staticmethod
     def _find_path(
@@ -386,6 +245,8 @@ class HeadlessSimulation(TrafficSimulation):
     ) -> dict:
         """Run the simulation until a target number of trips complete.
 
+        Uses the same Poisson spawn process as the visible simulation.
+
         Args:
             min_completed: Stop when this many trips have been recorded.
             max_steps: Safety limit on iterations.
@@ -400,25 +261,29 @@ class HeadlessSimulation(TrafficSimulation):
         last_logged_completed = 0
         LOG_INTERVAL = max(1, min_completed // 20)
 
-        while self.completed_trips < min_completed and step < max_steps:
+        while self._stats["completed_trips"] < min_completed and step < max_steps:
             step += 1
 
             # Advance the simulation using the full update() method
-            # (includes selfish rerouting, traffic lights, car movement, and cleanup)
+            # (includes Poisson spawning, selfish rerouting, traffic lights,
+            #  car movement, and cleanup)
             clamped_dt = min(dt, 0.1)
             self.update(clamped_dt)
 
             # Progress reporting
+            current_completed = self._stats["completed_trips"]
             if (progress_callback
-                    and self.completed_trips != last_logged_completed
-                    and self.completed_trips % LOG_INTERVAL == 0):
-                progress_callback(self.completed_trips, min_completed)
-                last_logged_completed = self.completed_trips
+                    and current_completed != last_logged_completed
+                    and current_completed % LOG_INTERVAL == 0):
+                progress_callback(current_completed, min_completed)
+                last_logged_completed = current_completed
 
-        avg = self.total_travel_time / self.completed_trips if self.completed_trips > 0 else 0.0
+        completed = self._stats["completed_trips"]
+        total_time = self._stats["total_travel_time_seconds"]
+        avg = total_time / completed if completed > 0 else 0.0
         return {
-            "completed_trips": self.completed_trips,
-            "total_travel_time_seconds": self.total_travel_time,
+            "completed_trips": completed,
+            "total_travel_time_seconds": total_time,
             "avg_travel_time_seconds": avg,
             "time_seconds": self.time_seconds,
             "steps": step,
@@ -426,9 +291,11 @@ class HeadlessSimulation(TrafficSimulation):
 
     def get_stats(self) -> dict:
         """Return current statistics (used by renderer, not needed here)."""
-        avg = self.total_travel_time / self.completed_trips if self.completed_trips > 0 else 0.0
+        completed = self._stats["completed_trips"]
+        total_time = self._stats["total_travel_time_seconds"]
+        avg = total_time / completed if completed > 0 else 0.0
         return {
-            "completed_trips": self.completed_trips,
+            "completed_trips": completed,
             "avg_travel_time_seconds": avg,
         }
 
@@ -648,7 +515,7 @@ def find_braess_roads(
     if verbose:
         print("Phase 1: Establishing baseline (all roads open)...", file=sys.stderr)
 
-    baseline_sim = HeadlessSimulation(road_network, commuter_pairs)
+    baseline_sim = HeadlessSimulation(road_network, poisson_rate=0.5)
     baseline_result = baseline_sim.run_until_stable(
         min_completed=min_completed,
         dt=dt,
@@ -698,7 +565,7 @@ def find_braess_roads(
         road_network.block_edge(u, v, key)
 
         # Run headless simulation with this road closed
-        test_sim = HeadlessSimulation(road_network, commuter_pairs)
+        test_sim = HeadlessSimulation(road_network, poisson_rate=0.5)
         test_result = test_sim.run_until_stable(
             min_completed=min_completed,
             dt=dt,
@@ -794,7 +661,7 @@ def _test_edge_worker(
     rn.block_edge(u, v, key)
 
     # Run headless simulation
-    sim = HeadlessSimulation(rn, commuter_pairs)
+    sim = HeadlessSimulation(rn, poisson_rate=0.5)
     result = sim.run_until_stable(
         min_completed=min_completed,
         dt=dt,
@@ -862,7 +729,7 @@ def find_braess_roads_parallel(
     if verbose:
         print("Phase 1: Establishing baseline (all roads open)...", file=sys.stderr)
 
-    baseline_sim = HeadlessSimulation(road_network, commuter_pairs)
+    baseline_sim = HeadlessSimulation(road_network, poisson_rate=0.5)
     baseline_result = baseline_sim.run_until_stable(
         min_completed=min_completed,
         dt=dt,

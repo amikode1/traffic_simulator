@@ -11,6 +11,7 @@ MAX_CAR_COUNT: Final[int] = 1500
 MIN_CAR_COUNT: Final[int] = 0
 TICK_RATE_HZ: Final[int] = 60
 SPAWN_INTERVAL_SECONDS: Final[float] = 0.5
+POISSON_SPAWN_RATE: Final[float] = 0.5  # cars per second (λ) — light traffic
 
 # ── Simulation speed ──────────
 MIN_SPEED_MULTIPLIER: Final[float] = 0.1

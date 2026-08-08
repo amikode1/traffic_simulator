@@ -3,6 +3,10 @@
 This is the central orchestrator that ties together the road network,
 pathfinding, cars, and traffic lights. It runs the simulation tick and
 provides methods for the renderer and UI to query state.
+
+Cars are spawned using a Poisson process: at a fixed rate λ (cars per second),
+the time until the next spawn is drawn from an exponential distribution.
+This models independent random arrivals, matching real traffic flow theory.
 """
 
 import logging
@@ -28,27 +32,30 @@ log = logging.getLogger(__name__)
 class TrafficSimulation:
     """The main simulation engine.
 
+    Cars are spawned via a Poisson process at rate λ (cars/second).
+    Each car gets a random origin and destination, drives there, and
+    is removed upon arrival. No respawning — each trip is independent.
+
     Attributes:
         road_network: The RoadNetwork instance.
         traffic_lights: List of TrafficLight instances.
         cars: List of active Car instances.
         algorithm: Currently selected pathfinding algorithm.
-        desired_car_count: Target number of cars (set by UI slider).
+        poisson_rate: Target spawn rate λ (cars per second).
         next_car_id: Auto-incrementing ID counter.
         time_seconds: Total elapsed simulation time.
-        spawn_timer: Accumulator for spawning cars at intervals.
+        _next_spawn_time: Simulation time of the next scheduled spawn.
     """
 
     road_network: RoadNetwork
     traffic_lights: list[TrafficLight] = field(default_factory=list)
     cars: list[Car] = field(default_factory=list)
     algorithm: str = config.DEFAULT_ALGORITHM
-    desired_car_count: int = config.DEFAULT_CAR_COUNT
+    poisson_rate: float = config.POISSON_SPAWN_RATE
     speed_multiplier: float = config.DEFAULT_SPEED_MULTIPLIER
     next_car_id: int = 0
     time_seconds: float = 0.0
-    spawn_timer: float = 0.0
-    warmup_seconds: float = 0.0  # if > 0, trips completed before this time are discarded
+    _next_spawn_time: float = 0.0
     _stats: dict = field(default_factory=lambda: {
         "total_spawned": 0,
         "total_reached_destination": 0,
@@ -91,8 +98,13 @@ class TrafficSimulation:
         # 1. Update traffic lights
         self._update_traffic_lights(dt)
 
-        # 2. Spawn or despawn cars to match desired count
-        self._adjust_car_count(dt)
+        # 2. Poisson spawn — check if it's time to spawn a new car
+        if self.time_seconds >= self._next_spawn_time:
+            self._schedule_next_spawn()
+            car = self._spawn_car()
+            if car is not None:
+                self.cars.append(car)
+                self._stats["total_spawned"] += 1
 
         # 3. Move all cars
         self._move_cars(dt)
@@ -100,18 +112,15 @@ class TrafficSimulation:
         # 4. Remove cars that reached destination
         self._remove_arrived_cars()
 
-    def set_warmup(self, seconds: float) -> None:
-        """Set a warm-up period — trips that finish before this sim time are not recorded.
-
-        This prevents early short trips (empty roads) from distorting the average.
-        """
-        self.warmup_seconds = seconds
-
     def set_desired_car_count(self, count: int) -> None:
-        """Set the target number of cars (clamped to min/max)."""
-        self.desired_car_count = max(
-            config.MIN_CAR_COUNT, min(count, config.MAX_CAR_COUNT)
-        )
+        """Set the target spawn rate (clamped to sensible range).
+
+        For Poisson spawning, this adjusts λ proportionally.
+        count=0 → λ=0, count=MAX → λ=5.0 cars/s.
+        """
+        import config
+        ratio = count / max(config.DEFAULT_CAR_COUNT, 1)
+        self.poisson_rate = max(0.0, min(5.0, config.POISSON_SPAWN_RATE * max(0.1, ratio)))
 
     def set_speed_multiplier(self, multiplier: float) -> None:
         """Set the simulation speed multiplier (clamped to min/max)."""
@@ -242,6 +251,19 @@ class TrafficSimulation:
 
     # ── Internal: Spawning ──────────────────────────────────────
 
+    def _schedule_next_spawn(self) -> None:
+        """Schedule the next car spawn using the exponential distribution.
+
+        Draws the inter-arrival time from Exp(λ) where λ = poisson_rate.
+        dt = -ln(1 - U) / λ, where U ~ Uniform[0, 1).
+        """
+        u = random.random()
+        if self.poisson_rate > 0:
+            dt = -math.log(1.0 - u) / self.poisson_rate
+        else:
+            dt = float('inf')  # never spawn
+        self._next_spawn_time = self.time_seconds + dt
+
     def _spawn_car(self) -> Optional[Car]:
         """Spawn a single car at a random edge on the network.
 
@@ -331,35 +353,11 @@ class TrafficSimulation:
         car.route = path
         car.route_index = 0  # route[0] = u, route[1] = v
 
+        # Remove commuter mode O-D storage — Poisson spawns are independent one-shot trips
+
         self.next_car_id += 1
         self._stats["total_spawned"] += 1
         return car
-
-    def _adjust_car_count(self, dt: float) -> None:
-        """Spawn or despawn cars to match the desired count."""
-        # Spawn — burst spawn when far from target
-        if len(self.cars) < self.desired_car_count:
-            deficit = self.desired_car_count - len(self.cars)
-            # Spawn multiple cars per tick when deficit is large
-            spawn_count = 1
-            if deficit >= 20:
-                spawn_count = 3
-            elif deficit >= 10:
-                spawn_count = 2
-            for _ in range(spawn_count):
-                if len(self.cars) < self.desired_car_count:
-                    car = self._spawn_car()
-                    if car is not None:
-                        self.cars.append(car)
-                    else:
-                        break  # can't spawn right now
-
-        # Despawn (remove excess cars)
-        while len(self.cars) > self.desired_car_count:
-            if self.cars:
-                self.cars.pop(0)  # remove oldest car
-            else:
-                break
 
     # ── Internal: Movement ──────────────────────────────────────
 
@@ -811,21 +809,14 @@ class TrafficSimulation:
     # ── Internal: Cleanup ───────────────────────────────────────
 
     def _remove_arrived_cars(self) -> None:
-        """Remove cars that have reached their destination and record travel times.
-
-        During the warm-up period (self.warmup_seconds > 0), arrived cars are
-        still removed but their travel times are NOT counted in the stats.
-        This prevents early short trips (empty roads) from distorting the average.
-        """
+        """Remove cars that have reached their destination and record travel times."""
         remaining: list[Car] = []
-        recording = self.warmup_seconds <= 0.0 or self.time_seconds >= self.warmup_seconds
         for car in self.cars:
             if car.reached_destination:
                 self._stats["total_reached_destination"] += 1
-                if recording:
-                    travel_time = self.time_seconds - car.spawn_time
-                    self._stats["total_travel_time_seconds"] += travel_time
-                    self._stats["completed_trips"] += 1
+                travel_time = self.time_seconds - car.spawn_time
+                self._stats["total_travel_time_seconds"] += travel_time
+                self._stats["completed_trips"] += 1
             else:
                 remaining.append(car)
         self.cars = remaining

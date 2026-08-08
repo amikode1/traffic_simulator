@@ -252,12 +252,7 @@ def main() -> None:
     simulation = TrafficSimulation(
         road_network=road_network,
         traffic_lights=traffic_lights,
-        desired_car_count=config.DEFAULT_CAR_COUNT,
     )
-    # Warm-up period: discard trips completed before this simulation time
-    # so the average travel time reflects steady-state congestion, not
-    # the early empty-road period.
-    simulation.set_warmup(60.0)
 
     # Apply GA info to simulation and window title (after simulation exists)
     if _ga_label_text:

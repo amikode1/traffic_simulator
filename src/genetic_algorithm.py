@@ -97,7 +97,7 @@ def _evaluate_chromosome_worker(args: tuple) -> tuple[list[int], float]:
             rn.block_edge(u, v, key)
 
     # Run simulation
-    sim = HeadlessSimulation(rn, commuter_pairs)
+    sim = HeadlessSimulation(rn, poisson_rate=0.5)
     result = sim.run_until_stable(
         min_completed=min_completed,
         dt=dt,

@@ -590,10 +590,13 @@ class Renderer:
         )
         self.screen.blit(city_text, (panel_x + 10, y_offset))
 
-        # ── Car count slider info ──
+        # ── Car count and spawn rate ──
         y = y_offset + 25
-        label = self.font.render(f"Cars: {len(simulation.cars)} / {simulation.desired_car_count}", True, (200, 200, 200))
+        label = self.font.render(f"Cars: {len(simulation.cars)}", True, (200, 200, 200))
         self.screen.blit(label, (panel_x + 10, y))
+        y += 25
+        rate_text = self.font_small.render(f"Spawn rate: {simulation.poisson_rate:.2f} cars/s", True, (150, 150, 150))
+        self.screen.blit(rate_text, (panel_x + 10, y))
         y += 25
 
         # ── Speed multiplier ──
